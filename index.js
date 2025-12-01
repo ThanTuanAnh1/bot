@@ -52,7 +52,6 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
 client.once('clientReady', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  });
 
   try {
     await rest.put(
