@@ -9,6 +9,8 @@
     "discord.js": "^14.13.0",
     "dotenv": "^16.x",
     "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "@discordjs/voice": "^0.17.1",
+    "play-dl": "^1.9.7"
   }
 }
