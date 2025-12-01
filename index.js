@@ -55,9 +55,10 @@ client.once('clientReady', async () => {
   });
 
   try {
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
-      body: commands
-    });
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands }
+    );
     console.log('✅ Slash commands registered.');
   } catch (err) {
     console.error('❌ Failed to register commands:', err);
