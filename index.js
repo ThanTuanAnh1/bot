@@ -1,3 +1,6 @@
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
+const play = require('play-dl');
+const player = createAudioPlayer();
 const {
   Client,
   GatewayIntentBits,
@@ -32,6 +35,17 @@ function formatUptime(ms) {
 
 const commands = [
   new SlashCommandBuilder().setName('ping').setDescription('Check bot latency'),
+  new SlashCommandBuilder()
+    .setName('play')
+    .setDescription('Play music from YouTube')
+    .addStringOption(option =>
+      option.setName('url')
+        .setDescription('YouTube URL')
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName('stop')
+    .setDescription('Stop the music')
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -71,6 +85,44 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.reply({ embeds: [embed] });
     }
+    
+    if (commandName === 'play') {
+      const url = interaction.options.getString('url');
+      const voiceChannel = interaction.member.voice.channel;
+  
+      if (!voiceChannel)
+        return interaction.reply('⚠️ You must enter the voice channel first!');
+  
+      try {
+        const stream = await play.stream(url);
+        const resource = createAudioResource(stream.stream, { inputType: stream.type });
+  
+        const connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: interaction.guild.id,
+          adapterCreator: interaction.guild.voiceAdapterCreator,
+        });
+  
+        player.play(resource);
+        connection.subscribe(player);
+  
+        await interaction.reply(`🎶 Now playing: **${url}**`);
+      } catch (err) {
+        console.error(err);
+        await interaction.reply('❌ Cannot play music.');
+      }
+    }
+  
+    if (commandName === 'stop') {
+      try {
+        player.stop();
+        await interaction.reply('⛔ Music stopped.');
+      } catch (err) {
+        console.error(err);
+        await interaction.reply('⚠️ Cant stop the music.');
+      }
+    }
+
   } catch (err) {
     console.error('❌ Interaction error:', err);
     await interaction.reply({ content: '⚠️ Something went wrong.', ephemeral: true });
