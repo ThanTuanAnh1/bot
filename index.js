@@ -1,14 +1,4 @@
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  VoiceConnectionStatus,
-  entersState
-} = require('@discordjs/voice');
-
-const play = require('play-dl');
-const player = createAudioPlayer();
+require('dotenv').config();
 
 const {
   Client,
@@ -16,12 +6,17 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  EmbedBuilder
+  EmbedBuilder,
 } = require('discord.js');
+
+const {
+  joinVoiceChannel,
+  VoiceConnectionStatus,
+  entersState,
+} = require('@discordjs/voice');
 
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config(); // Render cũng có thể dùng process.env trực tiếp
 
 // ================= CONFIG =================
 const TOKEN = process.env.TOKEN;
@@ -29,17 +24,17 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID;
 const PORT = process.env.PORT || 3000;
 
-let voiceConnection = null;
-
 // ================= DISCORD CLIENT =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
   ],
 });
+
+// ================= VOICE STATE =================
+let voiceConnection = null;
+let reconnecting = false;
 
 // ================= UPTIME =================
 const botStartTime = Date.now();
@@ -50,27 +45,31 @@ function formatUptime(ms) {
 
 // ================= SLASH COMMANDS =================
 const commands = [
-  new SlashCommandBuilder().setName('ping').setDescription('Check bot latency'),
   new SlashCommandBuilder()
-    .setName('play')
-    .setDescription('Play music from YouTube')
-    .addStringOption(o =>
-      o.setName('url').setDescription('YouTube URL').setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName('stop')
-    .setDescription('Stop the music')
+    .setName('ping')
+    .setDescription('Check bot latency'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ================= AUTO JOIN + AUTO REJOIN =================
+// ================= JOIN & TREO VOICE =================
 async function joinVoice() {
+  if (reconnecting) return;
+  reconnecting = true;
+
   try {
     const channel = await client.channels.fetch(VOICE_CHANNEL_ID);
 
     if (!channel || !channel.isVoiceBased()) {
-      return console.log('❌ Voice channel không hợp lệ');
+      console.log('❌ Voice channel không hợp lệ');
+      reconnecting = false;
+      return;
+    }
+
+    if (voiceConnection) {
+      try {
+        voiceConnection.destroy();
+      } catch {}
     }
 
     voiceConnection = joinVoiceChannel({
@@ -78,13 +77,13 @@ async function joinVoice() {
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: true,
+      encryptionMode: 'aead_xchacha20_poly1305_rtpsize',
     });
 
-    console.log(`🔊 Joined voice: ${channel.name}`);
+    console.log(`🔊 Bot treo voice tại: ${channel.name}`);
 
-    // ==== AUTO REJOIN HANDLER ====
     voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
-      console.log('⚠️ Voice disconnected, rejoining...');
+      console.log('⚠️ Voice disconnected → thử reconnect');
 
       try {
         await Promise.race([
@@ -92,12 +91,29 @@ async function joinVoice() {
           entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
       } catch {
-        setTimeout(joinVoice, 3000);
+        setTimeout(() => {
+          reconnecting = false;
+          joinVoice();
+        }, 3000);
       }
     });
 
+    voiceConnection.on(VoiceConnectionStatus.Destroyed, () => {
+      console.log('💥 Voice destroyed → rejoin');
+      setTimeout(() => {
+        reconnecting = false;
+        joinVoice();
+      }, 3000);
+    });
+
+    reconnecting = false;
+
   } catch (err) {
     console.error('❌ Join voice error:', err);
+    setTimeout(() => {
+      reconnecting = false;
+      joinVoice();
+    }, 5000);
   }
 }
 
@@ -114,67 +130,47 @@ client.once('ready', async () => {
 
   if (VOICE_CHANNEL_ID) joinVoice();
 
+  // Check mỗi phút, lỡ connection chết
   setInterval(() => {
-    console.log(`📡 Ping: ${client.ws.ping}ms`);
-  }, 30000);
+    if (!voiceConnection) joinVoice();
+  }, 60_000);
 });
 
 // ================= COMMAND HANDLER =================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  try {
-    if (interaction.commandName === 'ping') {
-      await interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle('🏓 Pong')
-            .setDescription(
-              `Ping: ${client.ws.ping}ms\nUptime: ${formatUptime(Date.now() - botStartTime)}`
-            )
-            .setColor(0xFBBCFF)
-        ]
-      });
-    }
-
-    if (interaction.commandName === 'play') {
-      const url = interaction.options.getString('url');
-      const vc = interaction.member.voice.channel;
-
-      if (!vc) return interaction.reply('⚠️ Join voice first');
-
-      const stream = await play.stream(url);
-      const resource = createAudioResource(stream.stream, { inputType: stream.type });
-
-      if (!voiceConnection)
-        voiceConnection = joinVoiceChannel({
-          channelId: vc.id,
-          guildId: interaction.guild.id,
-          adapterCreator: interaction.guild.voiceAdapterCreator,
-        });
-
-      player.play(resource);
-      voiceConnection.subscribe(player);
-
-      await interaction.reply(`🎶 Playing: ${url}`);
-    }
-
-    if (interaction.commandName === 'stop') {
-      player.stop();
-      await interaction.reply('⛔ Stopped');
-    }
-
-  } catch (err) {
-    console.error(err);
-    interaction.reply('❌ Error');
+  if (interaction.commandName === 'ping') {
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('🏓 Pong')
+          .setDescription(
+            `Ping: ${client.ws.ping}ms\nUptime: ${formatUptime(Date.now() - botStartTime)}`
+          )
+          .setColor(0xFBBCFF)
+      ]
+    });
   }
 });
 
-// ================= EXPRESS =================
+// ================= BỊ KICK / MOVE → VÀO LẠI =================
+client.on('voiceStateUpdate', (oldState, newState) => {
+  if (
+    oldState.member?.id === client.user.id &&
+    oldState.channelId &&
+    !newState.channelId
+  ) {
+    console.log('🚪 Bot bị kick khỏi voice → vào lại');
+    setTimeout(joinVoice, 2000);
+  }
+});
+
+// ================= EXPRESS (GIỮ APP SỐNG) =================
 const app = express();
 app.use(cors());
 
-app.get('/', (_, res) => res.send('🤖 Bot running'));
+app.get('/', (_, res) => res.send('🤖 Bot treo voice đang chạy'));
 app.get('/status', (_, res) => {
   res.json({
     status: client.isReady() ? 'online' : 'offline',
@@ -183,9 +179,9 @@ app.get('/status', (_, res) => {
   });
 });
 
-app.listen(PORT, () =>
-  console.log(`🌐 Express server running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🌐 Express server running on port ${PORT}`);
+});
 
 // ================= LOGIN =================
 client.login(TOKEN);
