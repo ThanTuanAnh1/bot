@@ -31,65 +31,72 @@ const client = new Client({
   ],
 });
 
-// ================= VOICE =================
-let connection;
+// ================= VOICE STATE =================
+let connection = null;
 let joining = false;
+let retryDelay = 5000; // backoff
 
+// ================= AUDIO (ONE TIME ONLY) =================
 const player = createAudioPlayer({
-  behaviors: {
-    noSubscriber: NoSubscriberBehavior.Pause,
-  },
+  behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
 });
 
-// 20ms silence @48kHz stereo
-const silence = Buffer.alloc(3840);
-const silent = () =>
-  createAudioResource(silence, {
-    inputType: 'raw',
-    inlineVolume: true,
-  });
+// 20ms PCM silence @48kHz stereo — TẠO 1 LẦN
+const silenceBuffer = Buffer.alloc(3840);
+const silentResource = createAudioResource(silenceBuffer, {
+  inputType: 'raw',
+});
 
-player.on(AudioPlayerStatus.Idle, () => player.play(silent()));
-player.on('error', () => player.play(silent()));
+player.on(AudioPlayerStatus.Idle, () => {
+  // KHÔNG tạo resource mới
+  player.play(silentResource);
+});
 
+player.on('error', () => {
+  player.play(silentResource);
+});
+
+// ================= JOIN VOICE =================
 async function joinVoice() {
   if (joining) return;
   joining = true;
 
   try {
     const channel = await client.channels.fetch(VOICE_CHANNEL_ID);
-    if (!channel?.isVoiceBased()) throw 'Invalid channel';
+    if (!channel?.isVoiceBased()) throw new Error('Invalid channel');
 
-    if (connection) connection.destroy();
-
-    connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
+    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) {
+      connection = joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator: channel.guild.voiceAdapterCreator,
+        selfDeaf: true,
+      });
+    }
 
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
 
     connection.subscribe(player);
-    player.play(silent());
+    player.play(silentResource);
 
-    connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      try {
-        await entersState(connection, VoiceConnectionStatus.Connecting, 5_000);
-      } catch {
-        setTimeout(joinVoice, 3000);
-      }
+    retryDelay = 5000; // reset backoff
+    console.log('🔊 Bot treo voice');
+
+    connection.on(VoiceConnectionStatus.Disconnected, () => {
+      console.log('💥 Voice disconnected');
+      setTimeout(joinVoice, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 60000); // max 60s
     });
 
     connection.on(VoiceConnectionStatus.Destroyed, () => {
-      setTimeout(joinVoice, 3000);
+      console.log('💥 Voice destroyed');
+      setTimeout(joinVoice, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 60000);
     });
 
-    console.log('🔊 Treo voice');
-
   } catch {
-    setTimeout(joinVoice, 5000);
+    setTimeout(joinVoice, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 60000);
   } finally {
     joining = false;
   }
@@ -100,11 +107,12 @@ client.once('ready', () => {
   console.log('✅ Bot ready');
   joinVoice();
 
+  // Check chậm hơn
   setInterval(() => {
     if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) {
       joinVoice();
     }
-  }, 60_000);
+  }, 120_000);
 });
 
 // ================= ANTI CRASH =================
