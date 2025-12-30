@@ -13,16 +13,16 @@ const {
   joinVoiceChannel,
   VoiceConnectionStatus,
   entersState,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  NoSubscriberBehavior,
 } = require('@discordjs/voice');
-
-const express = require('express');
-const cors = require('cors');
 
 // ================= CONFIG =================
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID;
-const PORT = process.env.PORT || 3000;
 
 // ================= DISCORD CLIENT =================
 const client = new Client({
@@ -32,88 +32,87 @@ const client = new Client({
   ],
 });
 
-// ================= VOICE STATE =================
-let voiceConnection = null;
-let reconnecting = false;
+// ================= STATE =================
+let connection;
+let joining = false;
 
 // ================= UPTIME =================
-const botStartTime = Date.now();
-function formatUptime(ms) {
-  const s = Math.floor(ms / 1000);
+const startTime = Date.now();
+const uptime = () => {
+  const s = Math.floor((Date.now() - startTime) / 1000);
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
-}
+};
 
-// ================= SLASH COMMANDS =================
+// ================= SLASH COMMAND =================
 const commands = [
   new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Check bot latency'),
+    .setDescription('Check bot status'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ================= JOIN & TREO VOICE =================
+// ================= AUDIO PLAYER (SILENT LOOP) =================
+const player = createAudioPlayer({
+  behaviors: { noSubscriber: NoSubscriberBehavior.Play },
+});
+
+// 20ms PCM silence @48kHz stereo
+const silence = Buffer.alloc(3840);
+const silentResource = () =>
+  createAudioResource(silence, { inputType: 'raw' });
+
+// Loop silence forever
+player.on(AudioPlayerStatus.Idle, () => {
+  player.play(silentResource());
+});
+
+player.on('error', err => {
+  console.error('🎧 Audio error:', err);
+  player.play(silentResource());
+});
+
+// ================= JOIN VOICE =================
 async function joinVoice() {
-  if (reconnecting) return;
-  reconnecting = true;
+  if (joining) return;
+  joining = true;
 
   try {
     const channel = await client.channels.fetch(VOICE_CHANNEL_ID);
-
     if (!channel || !channel.isVoiceBased()) {
-      console.log('❌ Voice channel không hợp lệ');
-      reconnecting = false;
-      return;
+      throw new Error('VOICE_CHANNEL_ID không hợp lệ');
     }
 
-    if (voiceConnection) {
-      try {
-        voiceConnection.destroy();
-      } catch {}
-    }
+    if (connection) connection.destroy();
 
-    voiceConnection = joinVoiceChannel({
+    connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: true,
-      encryptionMode: 'aead_xchacha20_poly1305_rtpsize',
     });
 
-    console.log(`🔊 Bot treo voice tại: ${channel.name}`);
+    connection.subscribe(player);
+    player.play(silentResource());
 
-    voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
-      console.log('⚠️ Voice disconnected → thử reconnect');
-
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
-        await Promise.race([
-          entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
+        await entersState(connection, VoiceConnectionStatus.Connecting, 5000);
       } catch {
-        setTimeout(() => {
-          reconnecting = false;
-          joinVoice();
-        }, 3000);
+        setTimeout(joinVoice, 3000);
       }
     });
 
-    voiceConnection.on(VoiceConnectionStatus.Destroyed, () => {
-      console.log('💥 Voice destroyed → rejoin');
-      setTimeout(() => {
-        reconnecting = false;
-        joinVoice();
-      }, 3000);
+    connection.on(VoiceConnectionStatus.Destroyed, () => {
+      setTimeout(joinVoice, 3000);
     });
 
-    reconnecting = false;
-
+    console.log(`🔊 Bot treo voice tại: ${channel.name}`);
   } catch (err) {
-    console.error('❌ Join voice error:', err);
-    setTimeout(() => {
-      reconnecting = false;
-      joinVoice();
-    }, 5000);
+    console.error('❌ Join voice failed:', err.message);
+    setTimeout(joinVoice, 5000);
+  } finally {
+    joining = false;
   }
 }
 
@@ -126,14 +125,16 @@ client.once('ready', async () => {
     { body: commands }
   );
 
-  console.log('✅ Slash commands registered');
+  console.log('✅ Slash command registered');
 
-  if (VOICE_CHANNEL_ID) joinVoice();
+  joinVoice();
 
-  // Check mỗi phút, lỡ connection chết
+  // Check mỗi 60s
   setInterval(() => {
-    if (!voiceConnection) joinVoice();
-  }, 60_000);
+    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) {
+      joinVoice();
+    }
+  }, 60000);
 });
 
 // ================= COMMAND HANDLER =================
@@ -144,43 +145,34 @@ client.on('interactionCreate', async interaction => {
     await interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setTitle('🏓 Pong')
+          .setTitle('🤖 Bot Status')
           .setDescription(
-            `Ping: ${client.ws.ping}ms\nUptime: ${formatUptime(Date.now() - botStartTime)}`
+            `Ping: ${client.ws.ping}ms\nUptime: ${uptime()}`
           )
-          .setColor(0xFBBCFF)
-      ]
+          .setColor(0xFBBCFF),
+      ],
     });
   }
 });
 
-// ================= BỊ KICK / MOVE → VÀO LẠI =================
+// ================= BỊ KICK VOICE → VÀO LẠI =================
 client.on('voiceStateUpdate', (oldState, newState) => {
   if (
     oldState.member?.id === client.user.id &&
     oldState.channelId &&
     !newState.channelId
   ) {
-    console.log('🚪 Bot bị kick khỏi voice → vào lại');
+    console.log('🚪 Bot bị kick voice → rejoin');
     setTimeout(joinVoice, 2000);
   }
 });
 
-// ================= EXPRESS (GIỮ APP SỐNG) =================
-const app = express();
-app.use(cors());
-
-app.get('/', (_, res) => res.send('🤖 Bot treo voice đang chạy'));
-app.get('/status', (_, res) => {
-  res.json({
-    status: client.isReady() ? 'online' : 'offline',
-    ping: client.ws.ping,
-    uptime: formatUptime(Date.now() - botStartTime),
-  });
+// ================= ANTI CRASH =================
+process.on('unhandledRejection', err => {
+  console.error('❗ UnhandledRejection:', err);
 });
-
-app.listen(PORT, () => {
-  console.log(`🌐 Express server running on port ${PORT}`);
+process.on('uncaughtException', err => {
+  console.error('❗ UncaughtException:', err);
 });
 
 // ================= LOGIN =================
